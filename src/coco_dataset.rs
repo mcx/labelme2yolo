@@ -18,8 +18,8 @@ use crate::coco::{Annotation, CocoConfig, CocoFile, Image};
 use crate::config::Args;
 use crate::types::{ImageAnnotation, Shape};
 use crate::utils::{
-    create_io_thread_pool, create_output_directory, infer_image_format, read_and_parse_json,
-    read_and_parse_json_buffered, read_and_parse_json_streaming,
+    create_io_thread_pool, create_output_directory, get_base_output_dir, infer_image_format,
+    read_and_parse_json, read_and_parse_json_buffered, read_and_parse_json_streaming,
 };
 
 /// Struct to hold the paths to the output directories for COCO dataset
@@ -104,7 +104,7 @@ pub fn setup_coco_output_directories(
     args: &Args,
     dirname: &Path,
 ) -> std::io::Result<CocoOutputDirs> {
-    let base_dir = dirname.join("COCODataset");
+    let base_dir = get_base_output_dir(args, dirname, "COCODataset");
     let annotations_dir = create_output_directory(&base_dir.join("annotations"))?;
     let images_dir = create_output_directory(&base_dir.join("images"))?;
 
@@ -209,6 +209,9 @@ fn process_json_files_for_coco(params: ProcessJsonFilesParams) -> ProcessJsonFil
     // Create a custom thread pool with limited concurrency
     let thread_pool = create_io_thread_pool(args.workers);
 
+    // Compute the output directory to exclude from scanning
+    let output_base_dir = get_base_output_dir(args, dirname, "COCODataset");
+
     // Walk through the directory structure to find JSON files
     use jwalk::WalkDir;
     use rayon::prelude::*;
@@ -219,13 +222,18 @@ fn process_json_files_for_coco(params: ProcessJsonFilesParams) -> ProcessJsonFil
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| {
-            // Skip COCO Dataset directories early by comparing directory names directly
+            // Skip output directories early by comparing directory paths
             if e.file_type().is_dir() {
-                if let Some(name) = e.file_name().to_str() {
-                    name != "COCODataset"
-                } else {
-                    false
+                let entry_path = e.path();
+                // Skip if this directory is the output directory or inside it
+                if entry_path.starts_with(&output_base_dir) {
+                    return false;
                 }
+                // Also skip legacy "COCODataset" directories for backward compatibility
+                if let Some(name) = e.file_name().to_str() {
+                    return name != "COCODataset";
+                }
+                false
             } else {
                 true
             }
@@ -336,7 +344,7 @@ fn process_json_files_for_coco(params: ProcessJsonFilesParams) -> ProcessJsonFil
             let count = processed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             let update_counter =
                 message_update_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            if update_counter % MESSAGE_UPDATE_INTERVAL == 0 {
+            if update_counter.is_multiple_of(MESSAGE_UPDATE_INTERVAL) {
                 pb.set_message(format!("Processed {} files...", count));
             }
         });
@@ -523,7 +531,7 @@ fn process_annotation_for_coco(params: ProcessAnnotationParams) {
         annotation.image_height,
     );
 
-    // Process shapes
+    // Process shapes - filter to only those in label_map
     let mut annotations = Vec::new();
     for shape in &annotation.shapes {
         if let Some(class_id) = label_map.get(&shape.label) {
@@ -777,6 +785,9 @@ fn process_background_images_for_coco(
     // Use the precomputed set of supported image extensions for fast lookup
     let image_extensions = crate::types::get_image_extensions_set();
 
+    // Compute the output directory to exclude from scanning
+    let output_base_dir = get_base_output_dir(args, dirname, "COCODataset");
+
     // Walk through the directory structure to find image files
     use jwalk::WalkDir;
     use rayon::prelude::*;
@@ -787,13 +798,18 @@ fn process_background_images_for_coco(
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| {
-            // Skip COCO Dataset directories early by comparing directory names directly
+            // Skip output directories early by comparing directory paths
             if e.file_type().is_dir() {
-                if let Some(name) = e.file_name().to_str() {
-                    name != "COCODataset"
-                } else {
-                    false
+                let entry_path = e.path();
+                // Skip if this directory is the output directory or inside it
+                if entry_path.starts_with(&output_base_dir) {
+                    return false;
                 }
+                // Also skip legacy "COCODataset" directories for backward compatibility
+                if let Some(name) = e.file_name().to_str() {
+                    return name != "COCODataset";
+                }
+                false
             } else {
                 true
             }
